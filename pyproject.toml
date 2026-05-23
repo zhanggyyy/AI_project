@@ -1,0 +1,10 @@
+[project]
+name = "loveletter-ai"
+version = "0.1.0"
+description = "A CS188-style Love Letter AI research environment."
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
