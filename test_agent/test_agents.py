@@ -6,7 +6,9 @@ from loveletter_ai.agents import (
     ExpectimaxAgent,
     LogicAgent,
     LogicKnowledgeBase,
+    MCTSAgent,
     NaiveHeuristicAgent,
+    QLearningAgent,
 )
 from loveletter_ai.cards import CardName
 from loveletter_ai.environment import LoveLetterEnv
@@ -69,6 +71,29 @@ class AgentReasoningTest(TestCase):
         state = env.begin_action_phase()
         actor = state.current_player
         agent = ExpectimaxAgent(depth=2)
+
+        action = agent.choose_action_from_env(env, actor, env.rng)
+
+        self.assertIn(action, env.legal_actions(actor))
+
+    def test_q_learning_update_moves_value_toward_reward(self) -> None:
+        agent = QLearningAgent(alpha=0.5, gamma=0.9, epsilon=0.0)
+        observation = make_observation()
+        action = Action(PlayerId(0), CardName.GUARD, PlayerId(1), CardName.PRINCESS)
+
+        agent.update(observation, action, reward=1.0)
+
+        chosen = agent.choose_action(observation, (action,), Random(1))
+        self.assertEqual(chosen, action)
+        self.assertEqual(len(agent.q_values), 1)
+        self.assertAlmostEqual(next(iter(agent.q_values.values())), 0.5)
+
+    def test_mcts_agent_returns_legal_action_from_env(self) -> None:
+        env = LoveLetterEnv(["Alice", "Bob"], seed=188)
+        state = env.reset()
+        state = env.begin_action_phase()
+        actor = state.current_player
+        agent = MCTSAgent(simulations=5, rollout_depth=4)
 
         action = agent.choose_action_from_env(env, actor, env.rng)
 
