@@ -457,3 +457,90 @@ def card_from_label(label: str) -> CardName | None:
         if card.value == normalized:
             return card
     return None
+
+
+
+
+class ImprovedHeuristicAgent:
+    """Score-based heuristic agent aligned with Greedy priority rules"""
+    def __init__(self, name: str = "ImprovedHeuristicAgent") -> None:
+        self.name = name
+
+    def choose_action(
+        self,
+        observation: Observation,
+        legal_actions: Sequence[Action],
+        rng: random.Random,
+    ) -> Action:
+        if not legal_actions:
+            raise ValueError("ImprovedHeuristicAgent received no legal actions.")
+
+        score_items = []
+        for idx, action in enumerate(legal_actions):
+            score = self._calc_action_score(observation, action)
+            score_items.append((score, idx, action))
+
+        max_score = max(s for s, _, _ in score_items)
+        best_options = [(idx, act) for s, idx, act in score_items if s == max_score]
+        _, pick = rng.choice(best_options)
+        return pick
+
+    def _calc_action_score(self, obs: Observation, act: Action) -> int:
+        hand = list(obs.own_hand)
+        self_id = obs.viewer
+        score = 0
+
+        vulnerable_pids = set()
+        for player_view in obs.players:
+            if not player_view.eliminated and not player_view.protected and player_view.id != self_id:
+                vulnerable_pids.add(player_view.id)
+
+        # 1. 强制出伯爵夫人
+        must_countess = CardName.COUNTESS in hand and (CardName.KING in hand or CardName.PRINCE in hand)
+        if must_countess:
+            score += 9999 if act.card == CardName.COUNTESS else -9999
+
+        # 2. 公主自保优先侍女，不能打公主
+        if CardName.PRINCESS in hand:
+            if act.card == CardName.HANDMAID:
+                score += 3000
+            if act.card == CardName.PRINCESS:
+                score -= 5000
+
+        # 3. Guard侍卫
+        if act.card == CardName.GUARD:
+            score += 200
+            if act.target in vulnerable_pids:
+                score += 120
+                guess_weight = {
+                    CardName.PRINCESS:100,
+                    CardName.KING:60,
+                    CardName.PRINCE:40,
+                    CardName.COUNTESS:30
+                }
+                score += guess_weight.get(act.guess, 0)
+        # Baron男爵
+        elif act.card == CardName.BARON:
+            if act.target in vulnerable_pids:
+                score += 180
+                rem = remaining_after_play(hand, CardName.BARON)
+                val = card_value(rem[0]) if rem else 0
+                score += val * 15
+            else:
+                score -= 100
+        # Priest牧师
+        elif act.card == CardName.PRIEST and act.target in vulnerable_pids:
+            score += 150
+        # Prince王子
+        elif act.card == CardName.PRINCE:
+            if act.target != self_id and act.target in vulnerable_pids:
+                score += 130
+            else:
+                score -= 30
+        # King国王
+        elif act.card == CardName.KING and act.target in vulnerable_pids:
+            score += 120
+
+        # 基础卡牌分值
+        score += card_value(act.card) * 8
+        return score
