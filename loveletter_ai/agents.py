@@ -465,6 +465,7 @@ def card_from_label(label: str) -> CardName | None:
 #greedy
 class GreedyAgent:
     """Greedy heuristic agent following fixed priority rules for Love Letter."""
+
     def __init__(self, name: str = "GreedyAgent") -> None:
         self.name = name
 
@@ -477,68 +478,97 @@ class GreedyAgent:
         if not legal_actions:
             raise ValueError("GreedyAgent received no legal actions.")
 
-        hand = list(observation.own_hand)
+        hand = set(observation.own_hand)
         own_pid = observation.viewer
         legal = list(legal_actions)
 
-        # Priority1：规则强制：手牌Countess + King/Prince 必须出Countess
-        if CardName.COUNTESS in hand and (CardName.KING in hand or CardName.PRINCE in hand):
+        # -------------------------
+        # Priority 1: Countess rule
+        # -------------------------
+        if CardName.COUNTESS in hand and (
+            CardName.KING in hand or CardName.PRINCE in hand
+        ):
             for act in legal:
                 if act.card == CardName.COUNTESS:
                     return act
 
-        # Priority2：持有公主，优先打侍女自保
+        # -------------------------
+        # Priority 2: survival (Handmaid > Princess risk)
+        # -------------------------
         if CardName.PRINCESS in hand and CardName.HANDMAID in hand:
             for act in legal:
                 if act.card == CardName.HANDMAID:
                     return act
 
-        # 筛选存活且无护盾的对手
+        # -------------------------
+        # filter valid targets once (important fix)
+        # -------------------------
         vulnerable_targets = [
             p for p in observation.players
             if not p.eliminated and not p.protected and p.id != own_pid
         ]
         vul_pids = {p.id for p in vulnerable_targets}
 
-        # Priority3.1 Guard侍卫：优先猜高价值牌、无盾对手
+        # -------------------------
+        # Priority 3: Guard
+        # -------------------------
         guard_acts = [a for a in legal if a.card == CardName.GUARD]
-        guess_prio = [CardName.PRINCESS, CardName.KING, CardName.PRINCE, CardName.COUNTESS]
+        guess_prio = [
+            CardName.PRINCESS,
+            CardName.KING,
+            CardName.PRINCE,
+            CardName.COUNTESS,
+            CardName.BARON,
+            CardName.PRIEST,
+        ]
+
         if guard_acts and vulnerable_targets:
             for guess in guess_prio:
                 for act in guard_acts:
-                    if act.guess == guess and act.target in vul_pids:
+                    if act.target in vul_pids and act.guess == guess:
                         return act
 
-        # Priority3.2 Baron男爵：只打无护盾活人
+            # fallback guard (IMPORTANT FIX)
+            return rng.choice(guard_acts)
+
+        # -------------------------
+        # Priority 4: Baron
+        # -------------------------
         baron_acts = [a for a in legal if a.card == CardName.BARON]
         if baron_acts and vulnerable_targets:
-            for act in baron_acts:
-                if act.target in vul_pids:
-                    return act
+            valid = [a for a in baron_acts if a.target in vul_pids]
+            if valid:
+                return rng.choice(valid)
 
-        # Priority4 Priest牧师偷看无盾对手
+        # -------------------------
+        # Priority 5: Priest
+        # -------------------------
         priest_acts = [a for a in legal if a.card == CardName.PRIEST]
         if priest_acts and vulnerable_targets:
-            for act in priest_acts:
-                if act.target in vul_pids:
-                    return act
+            valid = [a for a in priest_acts if a.target in vul_pids]
+            if valid:
+                return rng.choice(valid)
 
-        # Priority4 Prince王子：优先敌方，其次自己
+        # -------------------------
+        # Priority 6: Prince
+        # -------------------------
         prince_acts = [a for a in legal if a.card == CardName.PRINCE]
         if prince_acts:
-            enemy_prince = [a for a in prince_acts if a.target != own_pid]
-            if enemy_prince and vulnerable_targets:
-                for act in enemy_prince:
-                    if act.target in vul_pids:
-                        return act
-            return prince_acts[0]
+            enemy = [a for a in prince_acts if a.target in vul_pids]
+            if enemy:
+                return rng.choice(enemy)
+            return rng.choice(prince_acts)
 
-        # Priority4 King国王换牌无盾对手
+        # -------------------------
+        # Priority 7: King
+        # -------------------------
         king_acts = [a for a in legal if a.card == CardName.KING]
         if king_acts and vulnerable_targets:
-            for act in king_acts:
-                if act.target in vul_pids:
-                    return act
+            valid = [a for a in king_acts if a.target in vul_pids]
+            if valid:
+                return rng.choice(valid)
 
-        # 兜底：随机选一个合法动作
+        # -------------------------
+        # fallback
+        # -------------------------
         return rng.choice(legal)
