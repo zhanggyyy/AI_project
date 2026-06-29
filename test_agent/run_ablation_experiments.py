@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from loveletter_ai.agents import (  # noqa: E402
+    ApproximateQLearningAgent,
     BeliefMCTSAgent,
     ExpectimaxAgent,
     GreedyAgent,
@@ -22,7 +23,7 @@ from loveletter_ai.agents import (  # noqa: E402
 )
 from loveletter_ai.belief_expectimax import BeliefExpectimaxAgent  # noqa: E402
 from loveletter_ai.evaluation import evaluate_pair_symmetric  # noqa: E402
-from loveletter_ai.training import train_q_learning_self_play  # noqa: E402
+from loveletter_ai.training import train_q_learning_mixed  # noqa: E402
 
 
 def main() -> None:
@@ -50,10 +51,27 @@ def main() -> None:
 
 
 def run_fair_baselines(games_per_seat: int, profile: str) -> list[dict[str, str]]:
-    q_episodes = 500 if profile == "quick" else 1500
+    q_episodes = 1000 if profile == "quick" else 3000
+    approx_episodes = 5000 if profile == "quick" else 10000
     belief_samples = 6 if profile == "quick" else 12
     belief_mcts_sims = 12 if profile == "quick" else 32
-    trained_q = train_q_learning_self_play(episodes=q_episodes, seed=188, epsilon=0.25)
+    trained_q = train_q_learning_mixed(
+        episodes=q_episodes,
+        seed=188,
+        agent_kind="tabular",
+        epsilon_start=0.4,
+        epsilon_end=0.02,
+        opponent_pool=("random", "naive", "improved", "self"),
+    )
+    trained_approx = train_q_learning_mixed(
+        episodes=approx_episodes,
+        seed=777,
+        agent_kind="approximate",
+        epsilon_start=0.45,
+        epsilon_end=0.02,
+        alpha=0.025,
+        opponent_pool=("random", "naive", "self"),
+    )
     factories = {
         "Naive": lambda: NaiveHeuristicAgent("Naive"),
         "Logic": lambda: LogicAgent("Logic"),
@@ -69,10 +87,18 @@ def run_fair_baselines(games_per_seat: int, profile: str) -> list[dict[str, str]
             simulations=belief_mcts_sims,
             rollout_depth=8,
         ),
-        "Q-learning": lambda: QLearningAgent(
-            "QLearning",
+        "Tabular Q+prior": lambda: QLearningAgent(
+            "TabularQPrior",
             epsilon=0.0,
             q_values=trained_q.q_values,
+            visit_counts=trained_q.visit_counts,
+            heuristic_prior_weight=0.35,
+        ),
+        "Approx Q+shaping": lambda: ApproximateQLearningAgent(
+            "ApproxQShaping",
+            epsilon=0.0,
+            weights=trained_approx.weights,
+            initial_heuristic_weight=0.0,
         ),
     }
     rows = []
@@ -159,25 +185,89 @@ def run_belief_mcts_ablation(
 
 def run_q_learning_ablation(games_per_seat: int, profile: str) -> list[dict[str, str]]:
     rows = []
-    episode_values = (0, 100, 500) if profile == "quick" else (0, 100, 500, 1000, 3000)
+    tabular_episodes = 1000 if profile == "quick" else 3000
+    approx_episodes = 5000 if profile == "quick" else 10000
+    trained_tabular = train_q_learning_mixed(
+        episodes=tabular_episodes,
+        seed=188,
+        agent_kind="tabular",
+        epsilon_start=0.4,
+        epsilon_end=0.02,
+        opponent_pool=("random", "naive", "improved", "self"),
+    )
+    trained_approx = train_q_learning_mixed(
+        episodes=approx_episodes,
+        seed=777,
+        agent_kind="approximate",
+        epsilon_start=0.45,
+        epsilon_end=0.02,
+        alpha=0.025,
+        opponent_pool=("random", "naive", "self"),
+    )
+
+    variant_factories = {
+        "heuristic only": lambda: QLearningAgent(
+            "HeuristicOnly",
+            epsilon=0.0,
+            heuristic_prior_weight=0.35,
+        ),
+        "pure tabular Q": lambda: QLearningAgent(
+            "PureTabularQ",
+            epsilon=0.0,
+            q_values=trained_tabular.q_values,
+            visit_counts=trained_tabular.visit_counts,
+            heuristic_prior_weight=0.0,
+        ),
+        "tabular Q + prior": lambda: QLearningAgent(
+            "TabularQPrior",
+            epsilon=0.0,
+            q_values=trained_tabular.q_values,
+            visit_counts=trained_tabular.visit_counts,
+            heuristic_prior_weight=0.35,
+        ),
+        "approx Q + shaping": lambda: ApproximateQLearningAgent(
+            "ApproxQShaping",
+            epsilon=0.0,
+            weights=trained_approx.weights,
+            initial_heuristic_weight=0.0,
+        ),
+    }
+    for label, factory in variant_factories.items():
+        rows.append(
+            evaluate_row(
+                "q_learning_variants",
+                label,
+                factory,
+                lambda: RandomAgent("Random"),
+                games_per_seat,
+                seed=510_000,
+            )
+        )
+
+    episode_values = (0, 500, 1000, 5000) if profile == "quick" else (0, 500, 1000, 3000, 10000)
     for episodes in episode_values:
-        trained_q = train_q_learning_self_play(
+        trained_q = train_q_learning_mixed(
             episodes=episodes,
-            seed=188,
-            epsilon=0.25,
+            seed=777,
+            agent_kind="approximate",
+            epsilon_start=0.45,
+            epsilon_end=0.02,
+            alpha=0.025,
+            opponent_pool=("random", "naive", "self"),
         )
         rows.append(
             evaluate_row(
-                "q_learning_episodes",
+                "approx_q_learning_episodes",
                 f"episodes={episodes}",
-                lambda trained_q=trained_q: QLearningAgent(
-                    "QLearning",
+                lambda trained_q=trained_q: ApproximateQLearningAgent(
+                    "ApproxQShaping",
                     epsilon=0.0,
-                    q_values=trained_q.q_values,
+                    weights=trained_q.weights,
+                    initial_heuristic_weight=0.0,
                 ),
                 lambda: RandomAgent("Random"),
                 games_per_seat,
-                seed=40_000 + episodes,
+                seed=510_000,
                 param=str(episodes),
             )
         )
@@ -297,7 +387,8 @@ def write_markdown(
         ("belief_expectimax_samples", "Ablation: BeliefExpectimax Samples"),
         ("belief_expectimax_depth", "Ablation: BeliefExpectimax Depth"),
         ("belief_mcts_simulations", "Ablation: BeliefMCTS Simulations"),
-        ("q_learning_episodes", "Ablation: Q-learning Episodes"),
+        ("q_learning_variants", "Ablation: Q-learning Variants"),
+        ("approx_q_learning_episodes", "Ablation: Approximate Q-learning Episodes"),
         ("oracle_expectimax_depth", "Oracle Baseline: Expectimax Depth"),
         ("oracle_mcts_simulations", "Oracle Baseline: MCTS Simulations"),
     ]

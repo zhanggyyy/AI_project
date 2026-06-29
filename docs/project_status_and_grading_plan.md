@@ -16,7 +16,7 @@ which parts are still approximations.
 | Heuristic Agent | Implemented and improved | `NaiveHeuristicAgent`, `GreedyAgent`, `ImprovedHeuristicAgent` | Improved version uses card-count-based scoring and avoids impossible Guard guesses. |
 | Bayesian Agent | Partially implemented | `BayesianBelief`, `BeliefExpectimaxAgent` | It samples plausible hidden states from observations and logic constraints; it is not a full Bayesian posterior over complete histories. |
 | Expectimax Agent | Implemented as deterministic search baseline | `ExpectimaxAgent` | Strong performance, but it searches cloned true state when called through `choose_action_from_env`. Explain this as a controlled baseline, not fully fair hidden-information play. |
-| RL and MCTS | Implemented and split by fairness | `QLearningAgent`, `BeliefMCTSAgent`, `MCTSAgent`, `train_q_learning_self_play` | `BeliefMCTSAgent` is the fair hidden-information version; `MCTSAgent` is an oracle baseline. |
+| RL and MCTS | Implemented and split by fairness | `QLearningAgent`, `ApproximateQLearningAgent`, `BeliefMCTSAgent`, `MCTSAgent`, `train_q_learning_mixed` | RL now includes decaying epsilon, alpha decay, mixed opponents, reward shaping, and Q-learning variant ablations. `BeliefMCTSAgent` is the fair hidden-information version; `MCTSAgent` is an oracle baseline. |
 | Tournament matrix | Partially implemented | `evaluate_pair`, `evaluate_pair_symmetric`, `evaluate_agents.py` | Benchmark output now separates fair hidden-information agents from oracle baselines; still need a full all-pairs matrix for the final report. |
 | Robustness tests | Partially implemented | deterministic seed tests and symmetric evaluation | Need more explicit robustness experiments over seeds, seats, and search budgets. |
 | Ablation study | Runner implemented | `run_ablation_experiments.py`, `outputs/experiments/` | The quick display tables exist; final report should rerun with larger sample sizes. |
@@ -55,7 +55,10 @@ Implemented:
   environment states.
 - `BayesianBelief` and `BeliefExpectimaxAgent`: approximate hidden-state
   sampling plus expectimax over sampled determinizations.
-- `QLearningAgent`: tabular Q-learning with heuristic prior for unseen states.
+- `QLearningAgent`: tabular Q-learning with heuristic prior, decaying
+  exploration, and per-state alpha decay.
+- `ApproximateQLearningAgent`: feature-based linear Q-learning with
+  reward-shaping support and monotone tactical feature constraints.
 - `BeliefMCTSAgent`: information-set MCTS with root hidden-state sampling.
 - `MCTSAgent`: perfect-information MCTS with cloned-environment rollouts, kept
   as an oracle-style upper-bound baseline.
@@ -63,7 +66,7 @@ Implemented:
 Current interpretation:
 - The strongest "AI reasoning" story is the progression:
   Random -> Naive heuristic -> Logic/card counting -> Belief sampling ->
-  Expectimax/MCTS planning -> Q-learning self-play.
+  Expectimax/MCTS planning -> repaired Q-learning and approximate Q-learning.
 - The most honest framing is that this is a compact research environment plus
   several baseline agents, not a solved Love Letter bot.
 
@@ -134,18 +137,25 @@ Recommended framing:
   eliminated status, Priest observations, failed Guard guesses.
 - Avoid claiming exact Bayesian inference.
 
-### 3. Q-learning is a baseline, not a mature RL solution
+### 3. Q-learning needed repairs and ablations
 
-The Q-table uses compact observation/action keys and terminal rewards. This is
-easy to explain and relevant to the course, but it suffers from sparse state
-coverage. The heuristic prior helps cold starts, but the method is still a
-simple tabular baseline.
+The original Q-table used compact observation/action keys and terminal rewards.
+This was easy to explain, but it suffered from sparse state coverage and noisy
+updates. The repaired version keeps the tabular method as a baseline and adds:
+- decaying epsilon from exploration to exploitation;
+- per-state alpha decay to reduce single-game noise;
+- mixed opponents (`Random`, `Naive`, `Improved`, and self-play);
+- reward shaping for eliminations, Princess mistakes, Guard hits, Priest
+  information, and Princess protection;
+- an approximate Q-learning agent over interpretable action features;
+- explicit ablations for heuristic-only, pure Q, Q+prior, and approximate Q.
 
 Recommended additions:
-- Show learning curves vs training episodes.
-- Report Q-table size and win rate after 0, 100, 500, 1000, 3000 episodes.
-- Include a short explanation of why RL is difficult here: partial observability,
-  sparse terminal reward, non-stationary self-play opponent.
+- Show learning curves vs training episodes with larger confidence intervals.
+- Report tabular Q-table size, approximate feature weights, and win rate after
+  0, 500, 1000, 5000, and 10000 episodes.
+- Explain why pure tabular Q remains weak: partial observability, sparse
+  terminal reward, and non-stationary opponent behavior.
 
 ### 4. Evaluation is not yet report-grade
 
@@ -164,7 +174,7 @@ Remaining report-grade experiments:
   - BeliefMCTS simulations.
   - Oracle Expectimax depth.
   - Oracle MCTS simulations.
-  - Q-learning episodes.
+  - Q-learning variants and approximate Q-learning episodes.
 
 ### 5. Documentation is partly stale
 
@@ -182,11 +192,11 @@ setting for controlled comparison.
 ### 7. Reward definition differs from the proposal
 
 The proposal says `R=+1` for victory and `R=0` for elimination or loss. The
-current Q-learning helper uses `+1` for a win and `-1` for a loss. This is a
-reasonable reinforcement-learning shaping choice because it separates bad
-terminal outcomes from neutral transitions, but the report must explain it.
-Either update the written model to `+1/-1`, or change the implementation to
-match the proposal exactly before final experiments.
+current Q-learning helper uses `+1` for a win and `-1` for a loss, plus small
+training-only shaping rewards. This is a reasonable reinforcement-learning
+choice because it separates bad terminal outcomes from neutral transitions and
+helps assign credit in a sparse game. The report should explicitly state this
+as an implementation refinement relative to the proposal.
 
 ## 4. High-Score Repair Plan
 
@@ -205,7 +215,7 @@ match the proposal exactly before final experiments.
 
 1. Use `BeliefMCTSAgent` as the MCTS result in the fair hidden-information
    table, and keep `MCTSAgent` only in the oracle baseline table.
-2. Add learning curve plots for Q-learning.
+2. Add learning curve plots for approximate Q-learning.
 3. Add runtime/performance discussion: depth/samples/simulations trade off
    strength against compute time.
 4. Add a short limitations slide: approximate belief, uniform opponent model,

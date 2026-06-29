@@ -14,9 +14,13 @@ from loveletter_ai.cards import CardName
 from loveletter_ai.players import PlayerId
 from loveletter_ai.state import Observation, Phase
 
-from loveletter_ai.agents.heuristics import ImprovedHeuristicAgent
+from loveletter_ai.agents.heuristics import (
+    ImprovedHeuristicAgent,
+    expected_card_value,
+    unseen_card_counts,
+)
 from loveletter_ai.agents.logic import LogicKnowledgeBase
-from loveletter_ai.agents.utils import card_value
+from loveletter_ai.agents.utils import card_value, remaining_after_play, vulnerable_opponents
 from loveletter_ai.belief_expectimax.belief import BayesianBelief
 
 
@@ -30,15 +34,21 @@ class QLearningAgent:
         gamma: float = 0.95,
         epsilon: float = 0.1,
         heuristic_prior_weight: float = 0.35,
+        alpha_decay: float = 0.02,
+        min_alpha: float = 0.03,
         q_values: dict[tuple, float] | None = None,
+        visit_counts: dict[tuple, int] | None = None,
     ) -> None:
         self.name = name
         self.alpha = alpha
         self.gamma = gamma
         self.epsilon = epsilon
         self.heuristic_prior_weight = heuristic_prior_weight
+        self.alpha_decay = alpha_decay
+        self.min_alpha = min_alpha
         self.prior = ImprovedHeuristicAgent(name=f"{name}Prior")
         self.q_values: dict[tuple, float] = dict(q_values or {})
+        self.visit_counts: dict[tuple, int] = dict(visit_counts or {})
 
     def choose_action(
         self,
@@ -57,8 +67,7 @@ class QLearningAgent:
         priors = normalized_heuristic_priors(self.prior, observation, actions)
         scored = []
         for index, action in enumerate(actions):
-            q_value = self.q_values.get((state_key, action_key(action)), 0.0)
-            value = q_value + self.heuristic_prior_weight * priors[index]
+            value = self.action_value(state_key, action, priors[index])
             scored.append((value, index, action))
         best_value = max(value for value, _, _ in scored)
         best_actions = [
@@ -90,11 +99,30 @@ class QLearningAgent:
             )
 
         sample = reward + self.gamma * max_next
-        self.q_values[key] = old_value + self.alpha * (sample - old_value)
+        step_size = self._effective_alpha(key)
+        self.q_values[key] = old_value + step_size * (sample - old_value)
+
+    def action_value(self, state_key: tuple, action: Action, prior: float = 0.0) -> float:
+        """Return the policy value used for action selection."""
+
+        q_value = self.q_values.get((state_key, action_key(action)), 0.0)
+        return q_value + self.heuristic_prior_weight * prior
+
+    def _effective_alpha(self, key: tuple) -> float:
+        visits = self.visit_counts.get(key, 0) + 1
+        self.visit_counts[key] = visits
+        if self.alpha_decay <= 0:
+            return self.alpha
+        return max(self.min_alpha, self.alpha / (1.0 + self.alpha_decay * (visits - 1)))
 
     def save_q_table(self, path: str | Path) -> None:
         records = [
-            {"state": state_key, "action": action, "value": value}
+            {
+                "state": state_key,
+                "action": action,
+                "value": value,
+                "visits": self.visit_counts.get((state_key, action), 0),
+            }
             for (state_key, action), value in self.q_values.items()
         ]
         Path(path).write_text(json.dumps(records, indent=2), encoding="utf-8")
@@ -108,11 +136,19 @@ class QLearningAgent:
         gamma: float = 0.95,
         epsilon: float = 0.0,
         heuristic_prior_weight: float = 0.35,
+        alpha_decay: float = 0.02,
+        min_alpha: float = 0.03,
     ) -> "QLearningAgent":
         records = json.loads(Path(path).read_text(encoding="utf-8"))
         q_values = {
             (_freeze_json(record["state"]), _freeze_json(record["action"])): float(
                 record["value"]
+            )
+            for record in records
+        }
+        visit_counts = {
+            (_freeze_json(record["state"]), _freeze_json(record["action"])): int(
+                record.get("visits", 0)
             )
             for record in records
         }
@@ -122,8 +158,167 @@ class QLearningAgent:
             gamma=gamma,
             epsilon=epsilon,
             heuristic_prior_weight=heuristic_prior_weight,
+            alpha_decay=alpha_decay,
+            min_alpha=min_alpha,
             q_values=q_values,
+            visit_counts=visit_counts,
         )
+
+
+class ApproximateQLearningAgent:
+    """Linear approximate Q-learning over compact Love Letter features."""
+
+    def __init__(
+        self,
+        name: str = "ApproximateQLearningAgent",
+        alpha: float = 0.08,
+        gamma: float = 0.95,
+        epsilon: float = 0.1,
+        alpha_decay: float = 0.0005,
+        min_alpha: float = 0.01,
+        weights: dict[str, float] | None = None,
+        initial_heuristic_weight: float = 0.55,
+    ) -> None:
+        self.name = name
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.alpha_decay = alpha_decay
+        self.min_alpha = min_alpha
+        self.prior = ImprovedHeuristicAgent(name=f"{name}Prior")
+        self.update_count = 0
+        self.weights: dict[str, float] = {
+            "bias": 0.0,
+            "heuristic_score": initial_heuristic_weight,
+            "retained_value": 0.08,
+            "target_vulnerable": 0.05,
+            "discard_princess": -1.0,
+            "protect_princess": 0.35,
+            "guard_guess_probability": 0.55,
+            "guard_guess_value": 0.08,
+            "guard_impossible_guess": -0.9,
+            "baron_value_edge": 0.3,
+            "prince_target_princess_probability": 0.45,
+            "self_prince_low_retained": 0.12,
+        }
+        if weights:
+            self.weights.update(weights)
+
+    def choose_action(
+        self,
+        observation: Observation,
+        legal_actions: Sequence[Action],
+        rng: random.Random,
+    ) -> Action:
+        if not legal_actions:
+            raise ValueError("ApproximateQLearningAgent received no legal actions.")
+
+        actions = list(legal_actions)
+        if self.epsilon > 0 and rng.random() < self.epsilon:
+            return rng.choice(actions)
+
+        scored = [
+            (self.q_value(observation, action), index, action)
+            for index, action in enumerate(actions)
+        ]
+        best_value = max(value for value, _, _ in scored)
+        best = [
+            (index, action)
+            for value, index, action in scored
+            if value == best_value
+        ]
+        _, action = rng.choice(best)
+        return action
+
+    def update(
+        self,
+        observation: Observation,
+        action: Action,
+        reward: float,
+        next_observation: Observation | None = None,
+        next_legal_actions: Sequence[Action] = (),
+    ) -> None:
+        prediction = self.q_value(observation, action)
+        max_next = 0.0
+        if next_observation is not None and next_legal_actions:
+            max_next = max(
+                self.q_value(next_observation, next_action)
+                for next_action in next_legal_actions
+            )
+
+        target = reward + self.gamma * max_next
+        difference = target - prediction
+        step_size = self._effective_alpha()
+        for feature, value in action_features(self.prior, observation, action).items():
+            self.weights[feature] = self.weights.get(feature, 0.0) + step_size * difference * value
+            self.weights[feature] = clamp(self.weights[feature], -3.0, 3.0)
+        self._regularize_weights()
+
+    def q_value(self, observation: Observation, action: Action) -> float:
+        features = action_features(self.prior, observation, action)
+        return sum(self.weights.get(feature, 0.0) * value for feature, value in features.items())
+
+    def _effective_alpha(self) -> float:
+        self.update_count += 1
+        if self.alpha_decay <= 0:
+            return self.alpha
+        return max(self.min_alpha, self.alpha / (1.0 + self.alpha_decay * (self.update_count - 1)))
+
+    def _regularize_weights(self) -> None:
+        """Keep tactically monotone features from flipping sign under noise."""
+
+        non_negative = (
+            "heuristic_score",
+            "retained_value",
+            "protect_princess",
+            "guard_guess_probability",
+            "guard_guess_value",
+            "baron_value_edge",
+            "prince_target_princess_probability",
+            "self_prince_low_retained",
+        )
+        non_positive = (
+            "discard_princess",
+            "guard_impossible_guess",
+        )
+        for feature in non_negative:
+            if feature in self.weights:
+                self.weights[feature] = max(0.0, self.weights[feature])
+        for feature in non_positive:
+            if feature in self.weights:
+                self.weights[feature] = min(0.0, self.weights[feature])
+
+    def save_weights(self, path: str | Path) -> None:
+        payload = {
+            "weights": self.weights,
+            "update_count": self.update_count,
+        }
+        Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    @classmethod
+    def load_weights(
+        cls,
+        path: str | Path,
+        name: str = "ApproximateQLearningAgent",
+        alpha: float = 0.08,
+        gamma: float = 0.95,
+        epsilon: float = 0.0,
+        alpha_decay: float = 0.0005,
+        min_alpha: float = 0.01,
+    ) -> "ApproximateQLearningAgent":
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        agent = cls(
+            name=name,
+            alpha=alpha,
+            gamma=gamma,
+            epsilon=epsilon,
+            alpha_decay=alpha_decay,
+            min_alpha=min_alpha,
+            weights={key: float(value) for key, value in payload["weights"].items()},
+            initial_heuristic_weight=0.0,
+        )
+        agent.update_count = int(payload.get("update_count", 0))
+        return agent
 
 
 @dataclass(slots=True)
@@ -551,3 +746,78 @@ def normalized_heuristic_priors(
     if high == low:
         return [0.0 for _ in scores]
     return [(score - low) / (high - low) for score in scores]
+
+
+def action_features(
+    prior: ImprovedHeuristicAgent,
+    observation: Observation,
+    action: Action,
+) -> dict[str, float]:
+    """Return normalized action features for approximate Q-learning."""
+
+    hand = list(observation.own_hand)
+    remaining = remaining_after_play(hand, action.card)
+    retained_value = max((card_value(card) for card in remaining), default=0)
+    counts = unseen_card_counts(observation)
+    unseen_total = sum(counts.values())
+    expected_value = expected_card_value(counts)
+    vulnerable = vulnerable_opponents(observation)
+    raw_heuristic = prior.score_action(observation, action)
+
+    features = {
+        "bias": 1.0,
+        "heuristic_score": clamp(raw_heuristic / 300.0, -1.0, 1.0),
+        "played_value": card_value(action.card) / 8.0,
+        "retained_value": retained_value / 8.0,
+        "target_vulnerable": 1.0 if action.target in vulnerable else 0.0,
+        "hand_has_princess": 1.0 if CardName.PRINCESS in hand else 0.0,
+        "discard_princess": 1.0 if action.card == CardName.PRINCESS else 0.0,
+        "protect_princess": 1.0
+        if CardName.PRINCESS in hand and action.card == CardName.HANDMAID
+        else 0.0,
+        "play_handmaid": 1.0 if action.card == CardName.HANDMAID else 0.0,
+        "play_guard": 1.0 if action.card == CardName.GUARD else 0.0,
+        "play_baron": 1.0 if action.card == CardName.BARON else 0.0,
+        "play_prince": 1.0 if action.card == CardName.PRINCE else 0.0,
+        "play_king": 1.0 if action.card == CardName.KING else 0.0,
+    }
+
+    if action.card == CardName.GUARD and action.guess is not None:
+        guess_count = counts.get(action.guess, 0)
+        features["guard_guess_probability"] = (
+            guess_count / unseen_total if unseen_total else 0.0
+        )
+        features["guard_guess_value"] = card_value(action.guess) / 8.0
+        features["guard_impossible_guess"] = 1.0 if guess_count <= 0 else 0.0
+    else:
+        features["guard_guess_probability"] = 0.0
+        features["guard_guess_value"] = 0.0
+        features["guard_impossible_guess"] = 0.0
+
+    if action.card == CardName.BARON:
+        features["baron_value_edge"] = clamp(
+            (retained_value - expected_value) / 8.0,
+            -1.0,
+            1.0,
+        )
+    else:
+        features["baron_value_edge"] = 0.0
+
+    if action.card == CardName.PRINCE and action.target != observation.viewer:
+        princess_count = counts.get(CardName.PRINCESS, 0)
+        features["prince_target_princess_probability"] = (
+            princess_count / unseen_total if unseen_total else 0.0
+        )
+    else:
+        features["prince_target_princess_probability"] = 0.0
+
+    if action.card == CardName.PRINCE and action.target == observation.viewer:
+        features["self_prince_low_retained"] = 1.0 if retained_value <= 2 else 0.0
+    else:
+        features["self_prince_low_retained"] = 0.0
+
+    return features
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))

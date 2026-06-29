@@ -3,6 +3,7 @@ from unittest import TestCase
 
 from loveletter_ai.actions import Action
 from loveletter_ai.agents import (
+    ApproximateQLearningAgent,
     BeliefMCTSAgent,
     ExpectimaxAgent,
     ImprovedHeuristicAgent,
@@ -11,6 +12,7 @@ from loveletter_ai.agents import (
     MCTSAgent,
     NaiveHeuristicAgent,
     QLearningAgent,
+    action_features,
 )
 from loveletter_ai.cards import CardName
 from loveletter_ai.environment import LoveLetterEnv
@@ -89,6 +91,53 @@ class AgentReasoningTest(TestCase):
         self.assertEqual(chosen, action)
         self.assertEqual(len(agent.q_values), 1)
         self.assertAlmostEqual(next(iter(agent.q_values.values())), 0.5)
+
+    def test_q_learning_alpha_decays_by_visit_count(self) -> None:
+        agent = QLearningAgent(
+            alpha=0.5,
+            gamma=0.0,
+            epsilon=0.0,
+            heuristic_prior_weight=0.0,
+            alpha_decay=1.0,
+            min_alpha=0.0,
+        )
+        observation = make_observation()
+        action = Action(PlayerId(0), CardName.GUARD, PlayerId(1), CardName.PRINCESS)
+
+        agent.update(observation, action, reward=1.0)
+        agent.update(observation, action, reward=1.0)
+
+        self.assertAlmostEqual(next(iter(agent.q_values.values())), 0.625)
+        self.assertEqual(next(iter(agent.visit_counts.values())), 2)
+
+    def test_approximate_q_learning_updates_feature_weights(self) -> None:
+        agent = ApproximateQLearningAgent(
+            alpha=0.1,
+            gamma=0.0,
+            epsilon=0.0,
+            alpha_decay=0.0,
+            weights={"heuristic_score": 0.0},
+            initial_heuristic_weight=0.0,
+        )
+        observation = make_observation(
+            own_hand=(CardName.PRINCESS, CardName.HANDMAID),
+        )
+        action = Action(PlayerId(0), CardName.HANDMAID)
+
+        before = dict(agent.weights)
+        agent.update(observation, action, reward=1.0)
+
+        self.assertNotEqual(before, agent.weights)
+        self.assertGreaterEqual(agent.weights["protect_princess"], 0.0)
+
+    def test_action_features_mark_impossible_guard_guess(self) -> None:
+        agent = ApproximateQLearningAgent()
+        observation = make_observation(own_hand=(CardName.PRINCESS, CardName.GUARD))
+        action = Action(PlayerId(0), CardName.GUARD, PlayerId(1), CardName.PRINCESS)
+
+        features = action_features(agent.prior, observation, action)
+
+        self.assertEqual(features["guard_impossible_guess"], 1.0)
 
     def test_improved_heuristic_avoids_impossible_guard_guess(self) -> None:
         agent = ImprovedHeuristicAgent()

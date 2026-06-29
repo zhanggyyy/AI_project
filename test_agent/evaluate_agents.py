@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from loveletter_ai.agents import (
+    ApproximateQLearningAgent,
     BeliefMCTSAgent,
     ExpectimaxAgent,
     GreedyAgent,
@@ -18,12 +19,28 @@ from loveletter_ai.agents import (
 )
 from loveletter_ai.belief_expectimax import BeliefExpectimaxAgent
 from loveletter_ai.evaluation import evaluate_pair_symmetric
-from loveletter_ai.training import train_q_learning_self_play
+from loveletter_ai.training import train_q_learning_mixed
 
 
 def main() -> None:
     games_per_seat = int(sys.argv[1]) if len(sys.argv) > 1 else 25
-    trained_q = train_q_learning_self_play(episodes=500, seed=188, epsilon=0.25)
+    trained_q = train_q_learning_mixed(
+        episodes=1000,
+        seed=188,
+        agent_kind="tabular",
+        epsilon_start=0.4,
+        epsilon_end=0.02,
+        opponent_pool=("random", "naive", "improved", "self"),
+    )
+    trained_approx_q = train_q_learning_mixed(
+        episodes=5000,
+        seed=777,
+        agent_kind="approximate",
+        epsilon_start=0.45,
+        epsilon_end=0.02,
+        alpha=0.025,
+        opponent_pool=("random", "naive", "self"),
+    )
 
     fair_factories = {
         "naive": lambda: NaiveHeuristicAgent("Naive"),
@@ -40,10 +57,18 @@ def main() -> None:
             simulations=16,
             rollout_depth=6,
         ),
-        "qlearning": lambda: QLearningAgent(
-            "QLearning",
+        "tabular_q_prior": lambda: QLearningAgent(
+            "TabularQPrior",
             epsilon=0.0,
             q_values=trained_q.q_values,
+            visit_counts=trained_q.visit_counts,
+            heuristic_prior_weight=0.35,
+        ),
+        "approx_q_shaping": lambda: ApproximateQLearningAgent(
+            "ApproxQShaping",
+            epsilon=0.0,
+            weights=trained_approx_q.weights,
+            initial_heuristic_weight=0.0,
         ),
     }
     oracle_factories = {

@@ -10,10 +10,12 @@ from loveletter_ai.agents.heuristics import (
 )
 from loveletter_ai.agents.logic import LogicAgent, LogicKnowledgeBase
 from loveletter_ai.agents.rl import (
+    ApproximateQLearningAgent,
     BeliefMCTSAgent,
     MCTSAgent,
     MCTSNode,
     QLearningAgent,
+    action_features,
     action_key,
     evaluate_position,
     observation_key,
@@ -22,6 +24,7 @@ from loveletter_ai.agents.utils import card_from_label, card_value, remaining_af
 
 __all__ = [
     "Agent",
+    "ApproximateQLearningAgent",
     "BeliefMCTSAgent",
     "ExpectimaxAgent",
     "GreedyAgent",
@@ -33,6 +36,7 @@ __all__ = [
     "NaiveHeuristicAgent",
     "QLearningAgent",
     "RandomAgent",
+    "action_features",
     "action_key",
     "card_from_label",
     "card_value",

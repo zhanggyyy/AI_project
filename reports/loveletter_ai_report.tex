@@ -33,14 +33,16 @@ This project studies \emph{Love Letter} as a compact stochastic,
 partially observable, adversarial game. We implement a reusable Python game
 environment and compare several agent families from the CS181 course:
 random play, handcrafted heuristics, symbolic logic, approximate Bayesian
-belief search, expectimax, Monte Carlo tree search, and tabular Q-learning.
+belief search, expectimax, Monte Carlo tree search, tabular Q-learning, and
+feature-based approximate Q-learning.
 The central implementation question is not simply whether an agent can win
 against a weak baseline, but whether it does so under the same hidden
 information available to a real player. Therefore, the project separates
 fair hidden-information agents from perfect-information oracle baselines.
 Pilot experiments show that card-counting heuristics, logic constraints, and
-Q-learning with a heuristic prior consistently outperform random play, while
-belief search is harder to tune and has high variance at small sample sizes.
+Q-learning with heuristic priors and reward-shaped approximate Q-learning
+consistently outperform random play, while belief search is harder to tune and
+has high variance at small sample sizes.
 The result is a complete experimental platform for studying uncertainty,
 search, and learning in a small but nontrivial imperfect-information game.
 \end{abstract}
@@ -239,8 +241,8 @@ opponent cards and is therefore aligned with the project setting.
 
 \subsection{Q-Learning}
 
-The Q-learning agent uses tabular state-action values over compact observation
-and action keys. The update rule is
+The first Q-learning agent uses tabular state-action values over compact
+observation and action keys. The update rule is
 \begin{equation}
 Q(o,a) \leftarrow Q(o,a) +
 \alpha\left[r + \gamma\max_{a'}Q(o',a') - Q(o,a)\right].
@@ -250,7 +252,25 @@ Q-values with a heuristic prior:
 \begin{equation}
 \mathrm{score}(o,a) = Q(o,a) + \lambda H_{\mathrm{norm}}(o,a).
 \end{equation}
-The agent is trained by self-play and then evaluated with exploration disabled.
+The improved training loop uses linearly decaying exploration, per-state
+learning-rate decay, mixed opponents, and small reward shaping terms. The
+mixed opponent pool samples Random, Naive, Improved, and self-play opponents
+so that the policy does not overfit to one behavior distribution. The shaping
+terms give dense feedback for tactically clear events: eliminating an opponent,
+being eliminated, discarding Princess, protecting Princess with Handmaid, and
+making an informative Priest move.
+
+We also implement an approximate Q-learning agent with a linear value model
+\begin{equation}
+Q(o,a) = \sum_k w_k f_k(o,a).
+\end{equation}
+The features include retained card value, normalized heuristic score, Guard
+guess probability, impossible Guard guesses, Baron value edge, Prince
+Princess-discard probability, and Princess safety indicators. Tactically
+monotone features are constrained to keep sensible signs, for example
+discarding Princess remains non-positive and protecting Princess remains
+non-negative. This makes approximate Q-learning a stable residual correction
+over the heuristic policy rather than a noisy replacement for it.
 
 \section{Experiments}
 
@@ -273,9 +293,11 @@ full profile with a larger sample size.
 
 Table~\ref{tab:fair} compares fair hidden-information agents against Random.
 The strongest simple agents are the logic, greedy, and improved heuristic
-agents, each reaching 77.5 percent in this pilot run. Q-learning is close at
-75.0 percent. Belief search variants improve over random but do not clearly
-beat the simpler rule-based baselines at this sample size.
+agents, each reaching 77.5 percent in this pilot run. The repaired RL agents
+now match that tier: tabular Q with a heuristic prior reaches 77.5 percent,
+and approximate Q with shaping also reaches 77.5 percent. BeliefMCTS improves
+over the earlier belief-search result, while BeliefExpectimax remains more
+sensitive to sampling noise.
 
 \begin{table}[t]
 \centering
@@ -289,22 +311,23 @@ Naive & 27-13-0 & 67.5\% & 52.0--79.9\\
 Logic & 31-9-0 & 77.5\% & 62.5--87.7\\
 Greedy & 31-9-0 & 77.5\% & 62.5--87.7\\
 Improved & 31-9-0 & 77.5\% & 62.5--87.7\\
-BeliefExpectimax & 27-13-0 & 67.5\% & 52.0--79.9\\
-BeliefMCTS & 27-13-0 & 67.5\% & 52.0--79.9\\
-Q-learning & 30-10-0 & 75.0\% & 59.8--85.8\\
+BeliefExpectimax & 26-14-0 & 65.0\% & 49.5--77.9\\
+BeliefMCTS & 30-10-0 & 75.0\% & 59.8--85.8\\
+Tabular Q+prior & 31-9-0 & 77.5\% & 62.5--87.7\\
+Approx Q+shaping & 31-9-0 & 77.5\% & 62.5--87.7\\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsection{Ablation Results}
 
-Table~\ref{tab:ablations} summarizes the main ablations. Two patterns are
-important. First, more computation does not automatically improve a
-hidden-information agent at small sample size: extra samples can increase
-variance if the belief model or rollout policy is weak. Second, the oracle
-expectimax baseline improves with depth, which suggests that the game engine
-and search mechanics are working, but also confirms that perfect information
-gives a different kind of advantage.
+Table~\ref{tab:ablations} summarizes the main ablations. Three patterns are
+important. First, pure tabular Q-learning is weak because the state-action
+space is sparse. Second, adding a heuristic prior recovers most of the lost
+performance, and approximate Q-learning with shaping gives a small further
+gain. Third, more computation does not automatically improve a
+hidden-information search agent at small sample size: extra samples can
+increase variance if the belief model or rollout policy is weak.
 
 \begin{table*}[t]
 \centering
@@ -314,17 +337,22 @@ gives a different kind of advantage.
 \toprule
 Family & Setting & W-L-D & Win rate & 95\% CI\\
 \midrule
-BeliefExpectimax samples & samples=1 & 31-9-0 & 77.5\% & 62.5--87.7\\
+BeliefExpectimax samples & samples=1 & 30-10-0 & 75.0\% & 59.8--85.8\\
 BeliefExpectimax samples & samples=4 & 29-11-0 & 72.5\% & 57.2--83.9\\
-BeliefExpectimax samples & samples=8 & 26-14-0 & 65.0\% & 49.5--77.9\\
+BeliefExpectimax samples & samples=8 & 30-10-0 & 75.0\% & 59.8--85.8\\
 BeliefExpectimax depth & depth=1 & 27-13-0 & 67.5\% & 52.0--79.9\\
 BeliefExpectimax depth & depth=2 & 27-13-0 & 67.5\% & 52.0--79.9\\
-BeliefMCTS simulations & simulations=4 & 25-15-0 & 62.5\% & 47.0--75.8\\
-BeliefMCTS simulations & simulations=12 & 23-17-0 & 57.5\% & 42.2--71.5\\
-BeliefMCTS simulations & simulations=24 & 29-11-0 & 72.5\% & 57.2--83.9\\
-Q-learning episodes & episodes=0 & 32-8-0 & 80.0\% & 65.2--89.5\\
-Q-learning episodes & episodes=100 & 26-14-0 & 65.0\% & 49.5--77.9\\
-Q-learning episodes & episodes=500 & 29-11-0 & 72.5\% & 57.2--83.9\\
+BeliefMCTS simulations & simulations=4 & 26-14-0 & 65.0\% & 49.5--77.9\\
+BeliefMCTS simulations & simulations=12 & 22-18-0 & 55.0\% & 39.8--69.3\\
+BeliefMCTS simulations & simulations=24 & 27-13-0 & 67.5\% & 52.0--79.9\\
+Q-learning variants & heuristic only & 30-10-0 & 75.0\% & 59.8--85.8\\
+Q-learning variants & pure tabular Q & 24-16-0 & 60.0\% & 44.6--73.7\\
+Q-learning variants & tabular Q+prior & 30-10-0 & 75.0\% & 59.8--85.8\\
+Q-learning variants & approx Q+shaping & 31-9-0 & 77.5\% & 62.5--87.7\\
+Approx Q episodes & episodes=0 & 29-11-0 & 72.5\% & 57.2--83.9\\
+Approx Q episodes & episodes=500 & 30-10-0 & 75.0\% & 59.8--85.8\\
+Approx Q episodes & episodes=1000 & 30-10-0 & 75.0\% & 59.8--85.8\\
+Approx Q episodes & episodes=5000 & 31-9-0 & 77.5\% & 62.5--87.7\\
 Oracle Expectimax & depth=1 & 30-10-0 & 75.0\% & 59.8--85.8\\
 Oracle Expectimax & depth=2 & 33-7-0 & 82.5\% & 68.0--91.2\\
 Oracle MCTS & simulations=4 & 32-8-0 & 80.0\% & 65.2--89.5\\
@@ -355,12 +383,13 @@ When the belief is noisy, deeper search can amplify a bad determinization
 rather than fix it. This explains why the sample and depth ablations do not
 yet show monotonic improvement.
 
-The Q-learning result also needs careful interpretation. The episode=0
-condition still uses the heuristic prior, so it is not a pure untrained random
-agent. Self-play training can help, but sparse terminal reward and a compact
-tabular key make learning unstable. A higher-scoring extension would report a
-learning curve over many seeds and separate the effect of the heuristic prior
-from the effect of learned Q-values.
+The Q-learning ablation confirms the diagnosis from development. Pure tabular
+Q-learning is not enough: it reaches only 60 percent in the pilot table.
+Adding the heuristic prior recovers the baseline to 75 percent, while the
+approximate Q-learning agent with reward shaping reaches 77.5 percent. This
+does not prove a large statistically significant RL advantage yet, because the
+confidence intervals are wide, but it gives a much cleaner story: each repair
+addresses a concrete weakness of the previous RL version.
 
 \section{Current Shortcomings}
 
@@ -377,8 +406,9 @@ scale. The main remaining issues are:
     and Gote tables.
     \item \textbf{Belief model.} The Bayesian agent is an approximate
     consistent-state sampler, not a full posterior over histories.
-    \item \textbf{RL maturity.} Tabular Q-learning is a useful baseline but
-    does not yet demonstrate a clean learning curve.
+    \item \textbf{RL maturity.} The repaired RL agent now has meaningful
+    ablations, but the final report should still include larger learning
+    curves before claiming a statistically significant advantage.
     \item \textbf{Two-player focus.} The engine supports 2--4 players, but the
     reported experiments use two-player rounds for controlled comparison.
 \end{itemize}
