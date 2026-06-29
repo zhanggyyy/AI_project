@@ -1,0 +1,6 @@
+.codex_branch_snapshots/
+.codex_git_repo/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+tmp/

@@ -1,0 +1,431 @@
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage[margin=0.75in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+
+\setlist[itemize]{leftmargin=*,itemsep=1pt,topsep=2pt}
+\setlist[enumerate]{leftmargin=*,itemsep=1pt,topsep=2pt}
+\renewcommand{\arraystretch}{1.12}
+\sloppy
+
+\title{\vspace{-0.5em}AI Agents for Love Letter:\\
+Reasoning, Belief Search, and Reinforcement Learning under Hidden Information}
+
+\author{
+Yanqi Zhang \and Yueqian Ma \and Yunyang Liu\\
+CS181 Final Project
+}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This project studies \emph{Love Letter} as a compact stochastic,
+partially observable, adversarial game. We implement a reusable Python game
+environment and compare several agent families from the CS181 course:
+random play, handcrafted heuristics, symbolic logic, approximate Bayesian
+belief search, expectimax, Monte Carlo tree search, and tabular Q-learning.
+The central implementation question is not simply whether an agent can win
+against a weak baseline, but whether it does so under the same hidden
+information available to a real player. Therefore, the project separates
+fair hidden-information agents from perfect-information oracle baselines.
+Pilot experiments show that card-counting heuristics, logic constraints, and
+Q-learning with a heuristic prior consistently outperform random play, while
+belief search is harder to tune and has high variance at small sample sizes.
+The result is a complete experimental platform for studying uncertainty,
+search, and learning in a small but nontrivial imperfect-information game.
+\end{abstract}
+
+\section{Introduction}
+
+Love Letter is a small card game with only 16 cards, but it contains the
+features that make many AI problems difficult: private hands, a hidden
+burned card, stochastic draws, adversarial targeting, and actions that
+reveal partial information. This makes it a useful course project because
+the full rules are implementable within a semester, while the decision
+problem still requires reasoning under uncertainty.
+
+Our proposal framed the project around four agent families: heuristic
+agents, Bayesian agents, expectimax search, and reinforcement learning with
+MCTS. The current implementation follows that plan and refactors the branch
+work into a single package. In addition, we explicitly distinguish two kinds
+of search:
+\begin{itemize}
+    \item \textbf{Fair hidden-information search}, where the agent samples
+    hidden states from an observation-derived belief and does not directly
+    inspect the opponent's true hand.
+    \item \textbf{Oracle search baselines}, where the agent searches from a
+    cloned true environment. These baselines measure an upper bound for
+    planning strength, but they are not directly comparable to real
+    hidden-information play.
+\end{itemize}
+
+This distinction is important for soundness. If an agent sees the full
+environment state, high win rates are less meaningful because they may come
+from illegal information. The report therefore presents oracle agents as
+diagnostic baselines rather than as the main claim.
+
+\section{Game Model}
+
+The base deck is shown in Table~\ref{tab:deck}. Each turn consists of drawing
+one card, then playing one of the two cards in hand. A round ends when all but
+one player are eliminated or when the deck is exhausted and the surviving
+players compare their remaining cards.
+
+\begin{table}[t]
+\centering
+\caption{Base Love Letter deck used by the environment.}
+\label{tab:deck}
+\begin{tabular}{lrrp{0.36\columnwidth}}
+\toprule
+Card & Value & Count & Effect summary\\
+\midrule
+Guard & 1 & 5 & Guess a non-Guard card.\\
+Priest & 2 & 2 & Privately view a hand.\\
+Baron & 3 & 2 & Compare hands; lower card loses.\\
+Handmaid & 4 & 2 & Gain temporary protection.\\
+Prince & 5 & 2 & Force discard and redraw.\\
+King & 6 & 1 & Swap hands.\\
+Countess & 7 & 1 & Forced with King or Prince.\\
+Princess & 8 & 1 & Lose if discarded.\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We model a complete state as
+\begin{equation}
+s = (s_{\mathrm{pub}}, s_{\mathrm{priv}}),
+\end{equation}
+where $s_{\mathrm{pub}}$ includes discard piles, eliminated players,
+protection flags, turn index, current player, and deck size, while
+$s_{\mathrm{priv}}$ includes private hands, the hidden set-aside card, and
+the exact deck order. For player $i$, the observation function is
+\begin{equation}
+o_i = O_i(s) =
+(\mathrm{public\ view}, \mathrm{own\ hand}, \mathrm{private\ events}_i).
+\end{equation}
+Agents receive $o_i$ and the legal action set $A(o_i)$.
+
+The transition model is mixed:
+\begin{itemize}
+    \item Card effects such as Guard, Baron, King, and Princess are
+    deterministic once the hidden state is fixed.
+    \item Draws are stochastic from the agent's perspective because the deck
+    order and hidden card are unknown.
+\end{itemize}
+For reinforcement learning, terminal reward is implemented as $+1$ for a win
+and $-1$ for a loss. This differs slightly from the proposal's $0$ loss
+reward, but it provides a clearer learning signal and separates losing
+terminal states from neutral nonterminal transitions.
+
+\section{Environment Implementation}
+
+The environment is implemented in \texttt{loveletter\_ai.environment}.
+\texttt{LoveLetterEnv} owns the true state, legal action generation, seeded
+randomness, and card-effect resolution. The true state is represented by
+\texttt{GameState}; the hidden-information-safe player view is represented by
+\texttt{Observation}. This boundary is the main engineering device that keeps
+agents fair.
+
+Important implementation choices include:
+\begin{itemize}
+    \item \textbf{Deterministic reproducibility.} Each round uses an explicit
+    seed. This makes tournament and ablation results repeatable.
+    \item \textbf{Rule-complete legal actions.} Legal action generation handles
+    Countess forced play, Guard guess restrictions, Handmaid protection, and
+    Prince self-targeting.
+    \item \textbf{Public/private event history.} Priest observations are
+    private to the viewer, while public events such as discards and
+    eliminations are visible to all agents.
+    \item \textbf{Search cloning.} The environment supports deep cloning for
+    expectimax and MCTS rollouts. The fair search agents overwrite hidden
+    fields with belief samples before rollouts.
+\end{itemize}
+
+The evaluation layer in \texttt{loveletter\_ai.evaluation} provides
+\texttt{run\_round}, \texttt{evaluate\_pair}, and
+\texttt{evaluate\_pair\_symmetric}. Symmetric evaluation runs both seat
+assignments, reducing first-player and seed bias.
+
+\section{Agents}
+
+\subsection{Random and Heuristic Agents}
+
+The random agent samples uniformly from legal actions and serves as the
+baseline. The naive heuristic agent scores actions with simple rules such as
+protecting the Princess, preferring Guard guesses, and avoiding Baron when the
+retained card is weak.
+
+The improved heuristic and greedy agents add card-count awareness. From an
+observation $o$, the agent estimates unseen card multiplicities
+\begin{equation}
+C_o(c) = C_{\mathrm{deck}}(c) - C_{\mathrm{own}}(c) -
+C_{\mathrm{discard}}(c).
+\end{equation}
+This lets it avoid impossible Guard guesses and estimate opponent hand values.
+The action score has the general form
+\begin{equation}
+\begin{aligned}
+H(o,a) ={}& w_r \cdot \mathrm{retained}(o,a)
++ w_t \cdot \mathrm{target}(o,a)\\
+&+ w_g \cdot \mathrm{guess}(o,a)
++ w_s \cdot \mathrm{safety}(o,a).
+\end{aligned}
+\end{equation}
+The weights are handcrafted in code rather than learned. This makes the policy
+easy to inspect and provides a strong baseline for the more advanced agents.
+
+\subsection{Logic Agent}
+
+The logic agent maintains a persistent knowledge base of possible opponent
+cards. The set for opponent $j$ is initialized as all card types and updated
+by public and private evidence:
+\begin{itemize}
+    \item visible own cards and discard piles are removed;
+    \item Priest observations collapse a target's possible set to one card;
+    \item failed Guard guesses remove the guessed card;
+    \item King swaps reset affected hand facts because ownership changes.
+\end{itemize}
+If the agent holds a Guard and the knowledge base has a singleton target set,
+it makes the guaranteed guess. Otherwise it falls back to the improved
+heuristic policy.
+
+\subsection{Belief Expectimax}
+
+The Bayesian component builds an approximate posterior over hidden states from
+the observation and logic constraints. It is approximate because it does not
+enumerate all histories or model opponent policies. Instead, it samples
+opponent hands, the burned card, and deck order without replacement from
+remaining card counts:
+\begin{equation}
+b_i(h \mid o_i) \propto
+\mathbf{1}[h \text{ is consistent with } o_i]\prod_{c} C_o(c).
+\end{equation}
+
+Belief expectimax evaluates a root action by sampling hidden states
+$h^{(1)},\ldots,h^{(K)}$ and averaging the expectimax value:
+\begin{equation}
+\hat{Q}(o_i,a) = \frac{1}{K}\sum_{k=1}^{K}
+V_{\mathrm{exp}}(s_{\mathrm{pub}}, h^{(k)}, a).
+\end{equation}
+Opponent actions are treated as chance nodes with a uniform policy. Draw nodes
+are enumerated by card multiplicity when possible.
+
+\subsection{MCTS}
+
+The oracle MCTS agent uses UCT over cloned complete states:
+\begin{equation}
+\mathrm{UCT}(v') =
+\frac{Q(v')}{N(v')} +
+c\sqrt{\frac{\log N(v)}{N(v')}}.
+\end{equation}
+Rollouts use an improved heuristic for the root player and random play for
+opponents.
+
+The fair \texttt{BeliefMCTSAgent} performs root information-set search. Each
+simulation samples a plausible hidden state from the belief, evaluates one
+root action, and updates root-level action statistics. This is less powerful
+than a full information-set MCTS tree, but it avoids directly reading hidden
+opponent cards and is therefore aligned with the project setting.
+
+\subsection{Q-Learning}
+
+The Q-learning agent uses tabular state-action values over compact observation
+and action keys. The update rule is
+\begin{equation}
+Q(o,a) \leftarrow Q(o,a) +
+\alpha\left[r + \gamma\max_{a'}Q(o',a') - Q(o,a)\right].
+\end{equation}
+Because the Love Letter observation space is sparse, the agent combines learned
+Q-values with a heuristic prior:
+\begin{equation}
+\mathrm{score}(o,a) = Q(o,a) + \lambda H_{\mathrm{norm}}(o,a).
+\end{equation}
+The agent is trained by self-play and then evaluated with exploration disabled.
+
+\section{Experiments}
+
+\subsection{Protocol}
+
+All reported pilot experiments use two-player rounds. For each pair, we use
+symmetric evaluation: agent A plays as player 0 for $n$ seeds, then as player
+1 for another $n$ seeds. Win rate is the fraction of all $2n$ rounds won by
+the first listed agent. Confidence intervals are Wilson 95 percent intervals.
+
+The current report tables were generated with:
+\begin{center}
+\texttt{python test\_agent/run\_ablation\_experiments.py 20 outputs/report\_experiments quick}
+\end{center}
+Thus each row contains 40 games. These results are suitable for development
+analysis and presentation drafts, but the final submission should rerun the
+full profile with a larger sample size.
+
+\subsection{Fair Hidden-Information Results}
+
+Table~\ref{tab:fair} compares fair hidden-information agents against Random.
+The strongest simple agents are the logic, greedy, and improved heuristic
+agents, each reaching 77.5 percent in this pilot run. Q-learning is close at
+75.0 percent. Belief search variants improve over random but do not clearly
+beat the simpler rule-based baselines at this sample size.
+
+\begin{table}[t]
+\centering
+\caption{Fair hidden-information agents vs Random, 20 games per seat.}
+\label{tab:fair}
+\begin{tabular}{lrrr}
+\toprule
+Agent & W-L-D & Win rate & 95\% CI\\
+\midrule
+Naive & 27-13-0 & 67.5\% & 52.0--79.9\\
+Logic & 31-9-0 & 77.5\% & 62.5--87.7\\
+Greedy & 31-9-0 & 77.5\% & 62.5--87.7\\
+Improved & 31-9-0 & 77.5\% & 62.5--87.7\\
+BeliefExpectimax & 27-13-0 & 67.5\% & 52.0--79.9\\
+BeliefMCTS & 27-13-0 & 67.5\% & 52.0--79.9\\
+Q-learning & 30-10-0 & 75.0\% & 59.8--85.8\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablation Results}
+
+Table~\ref{tab:ablations} summarizes the main ablations. Two patterns are
+important. First, more computation does not automatically improve a
+hidden-information agent at small sample size: extra samples can increase
+variance if the belief model or rollout policy is weak. Second, the oracle
+expectimax baseline improves with depth, which suggests that the game engine
+and search mechanics are working, but also confirms that perfect information
+gives a different kind of advantage.
+
+\begin{table*}[t]
+\centering
+\caption{Pilot ablations. Each row is evaluated against Random with 20 games per seat.}
+\label{tab:ablations}
+\begin{tabular}{llrrr}
+\toprule
+Family & Setting & W-L-D & Win rate & 95\% CI\\
+\midrule
+BeliefExpectimax samples & samples=1 & 31-9-0 & 77.5\% & 62.5--87.7\\
+BeliefExpectimax samples & samples=4 & 29-11-0 & 72.5\% & 57.2--83.9\\
+BeliefExpectimax samples & samples=8 & 26-14-0 & 65.0\% & 49.5--77.9\\
+BeliefExpectimax depth & depth=1 & 27-13-0 & 67.5\% & 52.0--79.9\\
+BeliefExpectimax depth & depth=2 & 27-13-0 & 67.5\% & 52.0--79.9\\
+BeliefMCTS simulations & simulations=4 & 25-15-0 & 62.5\% & 47.0--75.8\\
+BeliefMCTS simulations & simulations=12 & 23-17-0 & 57.5\% & 42.2--71.5\\
+BeliefMCTS simulations & simulations=24 & 29-11-0 & 72.5\% & 57.2--83.9\\
+Q-learning episodes & episodes=0 & 32-8-0 & 80.0\% & 65.2--89.5\\
+Q-learning episodes & episodes=100 & 26-14-0 & 65.0\% & 49.5--77.9\\
+Q-learning episodes & episodes=500 & 29-11-0 & 72.5\% & 57.2--83.9\\
+Oracle Expectimax & depth=1 & 30-10-0 & 75.0\% & 59.8--85.8\\
+Oracle Expectimax & depth=2 & 33-7-0 & 82.5\% & 68.0--91.2\\
+Oracle MCTS & simulations=4 & 32-8-0 & 80.0\% & 65.2--89.5\\
+Oracle MCTS & simulations=12 & 32-8-0 & 80.0\% & 65.2--89.5\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\section{Analysis}
+
+The main observation is that the fair agents do not usually exceed 80 percent
+against Random in the current pilot setting. This is reasonable. Love Letter
+has high inherent variance: an early Guard hit, Princess draw, or Prince
+discard can decide a round before a policy's long-term advantage has time to
+show. Because each row currently contains only 40 rounds, the confidence
+intervals are wide.
+
+The most reliable improvement comes from eliminating clearly bad actions:
+avoiding impossible Guard guesses, respecting the Countess rule, protecting a
+Princess with Handmaid, and using remaining-card counts for target decisions.
+That explains why the improved heuristic, greedy, and logic agents are strong
+relative to their complexity.
+
+Belief search is conceptually more aligned with the hidden-information game,
+but its current implementation is still approximate. It samples plausible
+states, assumes simple opponent behavior, and uses relatively shallow search.
+When the belief is noisy, deeper search can amplify a bad determinization
+rather than fix it. This explains why the sample and depth ablations do not
+yet show monotonic improvement.
+
+The Q-learning result also needs careful interpretation. The episode=0
+condition still uses the heuristic prior, so it is not a pure untrained random
+agent. Self-play training can help, but sparse terminal reward and a compact
+tabular key make learning unstable. A higher-scoring extension would report a
+learning curve over many seeds and separate the effect of the heuristic prior
+from the effect of learned Q-values.
+
+\section{Current Shortcomings}
+
+Compared with the reference report, this project is strongest in environment
+soundness and hidden-information framing, but weaker in final experimental
+scale. The main remaining issues are:
+\begin{itemize}
+    \item \textbf{Sample size.} The current report tables use pilot-scale
+    experiments. A final report should use the full ablation profile and a
+    larger symmetric tournament.
+    \item \textbf{Tournament matrix.} The proposal promised a full agent
+    tournament. The code supports pairwise evaluation, but the final report
+    should include an all-pairs matrix similar to the reference report's Sente
+    and Gote tables.
+    \item \textbf{Belief model.} The Bayesian agent is an approximate
+    consistent-state sampler, not a full posterior over histories.
+    \item \textbf{RL maturity.} Tabular Q-learning is a useful baseline but
+    does not yet demonstrate a clean learning curve.
+    \item \textbf{Two-player focus.} The engine supports 2--4 players, but the
+    reported experiments use two-player rounds for controlled comparison.
+\end{itemize}
+
+\section{External Resources and Tools}
+
+No external Love Letter engine code was copied. The game engine, agents, and
+evaluation scripts are implemented in Python within this repository. External
+resources and tools used are:
+\begin{itemize}
+    \item \textbf{Python standard library}: dataclasses, enum, random, copy,
+    collections, and pathlib are used for state structures, seeded stochastic
+    transitions, cloning, and counters.
+    \item \textbf{pytest}: used for unit and integration tests covering setup,
+    hidden-information rendering, belief sampling, agent legality, and match
+    completion.
+    \item \textbf{Tectonic/LaTeX}: used to compile this report from the LaTeX
+    source.
+    \item \textbf{Codex AI coding assistant}: used as a development assistant
+    for branch integration, refactoring, testing, report drafting, and
+    experiment organization. The team should review all code and explanations
+    before final submission.
+    \item \textbf{Love Letter base rules}: used as the game specification for
+    the 16-card deck and card effects. No third-party implementation was used.
+\end{itemize}
+
+\section{Conclusion}
+
+The project delivers a coherent Love Letter AI platform with a hidden-state
+environment, multiple agent families, fair and oracle search baselines, and
+reproducible evaluation scripts. The strongest course connection is the
+combination of partial observability, belief modeling, adversarial search, and
+reinforcement learning. To reach a high final grade, the main repair is not to
+add another complicated agent, but to strengthen the evidence: run a larger
+symmetric tournament, report confidence intervals, include ablations, and make
+the hidden-information fairness distinction explicit in both the report and
+presentation.
+
+\begin{thebibliography}{9}
+\bibitem{loveletter}
+Seiji Kanai. \emph{Love Letter}. Alderac Entertainment Group, base game rules.
+
+\bibitem{pytest}
+pytest documentation. \url{https://docs.pytest.org/}
+
+\bibitem{tectonic}
+Tectonic Typesetting System. \url{https://tectonic-typesetting.github.io/}
+\end{thebibliography}
+
+\end{document}
